@@ -155,6 +155,12 @@ This script:
 
 ### Recommended workflow
 
+> **Recommended long-term Douyin workflow:**
+> 1. `extract_audio.py --in-place --skip-existing`
+> 2. `transcribe_videos_subprocess.py --reuse-existing-wav --mps-first --language Chinese --state-file transcribe-progress.jsonl`
+>
+> This is the preferred setup for repeated Douyin batches on 16 GB Apple Silicon Macs.
+
 For larger batches on lower-memory Macs, prefer a **separated two-step flow**:
 
 1. `extract_audio.py --in-place` — first create all `video.wav` files beside videos
