@@ -96,18 +96,25 @@ def write_json(text: str, language: str, metadata: dict, segments: list,
         json.dump(output, f, ensure_ascii=False, indent=2)
 
 
-def write_error_log(audio_path: Path, error: Exception, output_dir: Path):
-    """Write a .error file so failed files are visible but not re-attempted."""
-    error_path = output_dir / f"{audio_path.stem}.error"
+def build_output_paths(audio_path: Path, input_dir: Path, output_dir: Path):
+    rel = audio_path.relative_to(input_dir)
+    base = (output_dir / rel).with_suffix("")
+    base.parent.mkdir(parents=True, exist_ok=True)
+    return base.with_suffix(".txt"), base.with_suffix(".json"), base.with_suffix(".error")
+
+
+def write_error_log(audio_path: Path, error: Exception, input_dir: Path, output_dir: Path):
+    """Write a mirrored .error file so failed files are visible but not re-attempted."""
+    _, _, error_path = build_output_paths(audio_path, input_dir, output_dir)
     with open(error_path, "w", encoding="utf-8") as f:
         f.write(f"file: {audio_path}\n")
         f.write(f"time: {datetime.now().isoformat()}\n")
         f.write(f"error: {type(error).__name__}: {error}\n")
 
 
-def is_done(stem: str, output_dir: Path) -> bool:
-    """A file is done if its JSON output exists and is valid."""
-    json_path = output_dir / f"{stem}.json"
+def is_done(audio_path: Path, input_dir: Path, output_dir: Path) -> bool:
+    """A file is done if its mirrored JSON output exists and is valid."""
+    _, json_path, _ = build_output_paths(audio_path, input_dir, output_dir)
     if not json_path.exists():
         return False
     try:
@@ -118,8 +125,9 @@ def is_done(stem: str, output_dir: Path) -> bool:
         return False
 
 
-def has_errored(stem: str, output_dir: Path) -> bool:
-    return (output_dir / f"{stem}.error").exists()
+def has_errored(audio_path: Path, input_dir: Path, output_dir: Path) -> bool:
+    _, _, error_path = build_output_paths(audio_path, input_dir, output_dir)
+    return error_path.exists()
 
 
 def main():
@@ -149,8 +157,8 @@ def main():
 
     # Collect audio files
     audio_files = sorted(
-        f for f in input_dir.iterdir()
-        if f.suffix.lower() in SUPPORTED_EXTENSIONS
+        f for f in input_dir.rglob("*")
+        if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS
     )
     if not audio_files:
         print(f"No audio files found in {input_dir}")
@@ -159,9 +167,9 @@ def main():
     # Partition into pending / skipped / errored
     pending, skipped, errored = [], [], []
     for f in audio_files:
-        if is_done(f.stem, output_dir):
+        if is_done(f, input_dir, output_dir):
             skipped.append(f)
-        elif has_errored(f.stem, output_dir) and not args.retry_errors:
+        elif has_errored(f, input_dir, output_dir) and not args.retry_errors:
             errored.append(f)
         else:
             pending.append(f)
@@ -190,7 +198,7 @@ def main():
     )
     print(f"ASR model loaded in {time.time() - t0:.1f}s")
 
-    asr_results = {}  # stem -> (text, language, transcribe_time)
+    asr_results = {}  # audio_key -> (audio_path, text, language, transcribe_time)
     for i, audio_path in enumerate(pending, 1):
         print(f"\n[{i}/{len(pending)}] Transcribing: {audio_path.name}")
         t1 = time.time()
@@ -202,12 +210,12 @@ def main():
             elapsed = time.time() - t1
             text = results[0].text
             language = results[0].language
-            asr_results[audio_path.stem] = (audio_path, text, language, elapsed)
+            asr_results[str(audio_path.relative_to(input_dir))] = (audio_path, text, language, elapsed)
             print(f"  Language: {language} | Time: {elapsed:.1f}s | "
                   f"Preview: {text[:60]}{'...' if len(text) > 60 else ''}")
         except Exception as e:
             print(f"  ERROR during ASR: {e}")
-            write_error_log(audio_path, e, output_dir)
+            write_error_log(audio_path, e, input_dir, output_dir)
 
     unload_model(asr_model)
     print(f"\nASR complete. {len(asr_results)}/{len(pending)} succeeded. Model unloaded.")
@@ -231,7 +239,7 @@ def main():
         )
         print(f"Aligner loaded in {time.time() - t2:.1f}s")
 
-        for i, (stem, (audio_path, text, language, _)) in enumerate(asr_results.items(), 1):
+        for i, (audio_key, (audio_path, text, language, _)) in enumerate(asr_results.items(), 1):
             print(f"\n[{i}/{len(asr_results)}] Aligning: {audio_path.name}")
             t3 = time.time()
             try:
@@ -251,20 +259,20 @@ def main():
                             "end_time": item.end_time,
                         })
                     segments = group_words_into_segments(list(results[0]))
-                align_results[stem] = (segments, word_timestamps, elapsed)
+                align_results[audio_key] = (segments, word_timestamps, elapsed)
                 print(f"  Time: {elapsed:.1f}s | Segments: {len(segments)}")
             except Exception as e:
                 print(f"  ERROR during alignment: {e}")
                 # Don't write error log — ASR succeeded; just skip timestamps
-                align_results[stem] = ([], [], 0.0)
+                align_results[audio_key] = ([], [], 0.0)
 
         unload_model(aligner)
         print("\nAlignment complete. Aligner unloaded.")
 
     # ── Write outputs ───────────────────────────────────────────────
     print("\nWriting outputs...")
-    for stem, (audio_path, text, language, transcribe_time) in asr_results.items():
-        segments, word_timestamps, align_time = align_results.get(stem, ([], [], 0.0))
+    for audio_key, (audio_path, text, language, transcribe_time) in asr_results.items():
+        segments, word_timestamps, align_time = align_results.get(audio_key, ([], [], 0.0))
 
         metadata = {
             "source_file": str(audio_path.resolve()),
@@ -279,11 +287,12 @@ def main():
             "timestamp": datetime.now().isoformat(),
         }
 
-        txt_path = output_dir / f"{stem}.txt"
-        json_path = output_dir / f"{stem}.json"
+        txt_path, json_path, error_path = build_output_paths(audio_path, input_dir, output_dir)
         write_txt(text, txt_path)
         write_json(text, language, metadata, segments, word_timestamps, json_path)
-        print(f"  Saved: {json_path.name}")
+        if error_path.exists():
+            error_path.unlink()
+        print(f"  Saved: {json_path}")
 
     # ── Summary ─────────────────────────────────────────────────────
     done_now = len(asr_results)

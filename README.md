@@ -88,7 +88,7 @@ python transcribe.py audio.mp3 --no-timestamps
 ### Batch (production)
 
 ```bash
-# Transcribe all audio files in a directory — models loaded once
+# Transcribe all audio files in a directory tree — models loaded once
 python batch_transcribe.py /path/to/audio/dir
 
 # With options
@@ -102,6 +102,97 @@ python batch_transcribe.py /path/to/audio/dir --retry-errors
 ```
 
 Supported formats: `.mp3`, `.wav`, `.flac`, `.m4a`, `.aac`, `.ogg`
+
+### Video → audio → transcription
+
+The pipeline also supports video inputs through a lightweight preprocessing step with `ffmpeg`.
+Add `ffmpeg` on your system, then use the helper scripts below.
+
+#### 1) Extract transcription-friendly WAV audio from videos
+
+```bash
+# Single video
+python extract_audio.py video.mp4
+
+# Directory of videos → mirrored WAV tree under ./audio_output/
+python extract_audio.py /path/to/video_dir --output-root audio_output
+
+# Write WAV next to each source video
+python extract_audio.py /path/to/video_dir --in-place
+```
+
+Default extraction settings are chosen for ASR:
+- mono (`-ac 1`)
+- 16 kHz (`-ar 16000`)
+- PCM WAV (`pcm_s16le`)
+
+Supported video formats: `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi`, `.m4v`
+
+#### 2) End-to-end video transcription
+
+```bash
+# Extract WAVs first, then batch transcribe them
+python transcribe_videos.py /path/to/video_dir --audio-root audio_output --language Chinese
+```
+
+This creates a mirrored audio tree under `audio_output/` and writes transcription outputs (`.txt`, `.json`) in the same mirrored relative paths. This avoids filename collisions when many videos share names like `video.mp4` / `video.wav`.
+
+#### 3) Write transcripts back beside each video
+
+If you want final transcription files to live in the same folder as each source video, use:
+
+```bash
+python transcribe_videos_in_place.py /path/to/video_dir --language Chinese
+```
+
+This script:
+- extracts ASR-friendly `<video_stem>.wav` with `ffmpeg` beside each video
+- runs ASR (and optional forced alignment)
+- writes `<video_stem>.txt` and `<video_stem>.json` beside each video
+- resumes safely by skipping videos that already have valid `.json` output
+- records failures as `<video_stem>.error`
+- can reuse existing WAV files with `--reuse-existing-wav`
+
+### Recommended workflow
+
+For larger batches on lower-memory Macs, prefer a **separated two-step flow**:
+
+1. `extract_audio.py --in-place` — first create all `video.wav` files beside videos
+2. `transcribe_videos_subprocess.py --reuse-existing-wav --mps-first` — then transcribe using **one Python subprocess per video**
+
+Why separate the steps?
+- easier to measure progress
+- easier to resume after crashes
+- easier to diagnose whether failures come from ffmpeg extraction or ASR
+- avoids mixing partially extracted and partially transcribed states
+
+Why one subprocess per video?
+- much more stable on 16 GB Apple Silicon Macs
+- each file gets a fresh Python process and fresh model state
+- one crashing / OOM file does not kill the whole batch
+- easier to do MPS-first with CPU fallback per file
+
+Recommended commands:
+
+```bash
+# Step 1: make sibling WAV files for every video
+python extract_audio.py /path/to/video_dir --in-place --skip-existing
+
+# Step 2: stable long-run transcription (resume-safe)
+python transcribe_videos_subprocess.py /path/to/video_dir \
+  --reuse-existing-wav \
+  --mps-first \
+  --language Chinese \
+  --state-file transcribe-progress.jsonl
+```
+
+Resume behavior:
+- completed files are skipped when a valid sibling `video.json` already exists
+- failed files are skipped by default if `video.error` exists
+- add `--retry-errors` to retry failed files
+- optional `--state-file` writes one JSONL progress record per video for auditing long runs
+
+For convenience when you want a one-command flow, `transcribe_videos_in_place.py` still supports extracting audio on demand, but for long-term Douyin batches the subprocess mode is the preferred path.
 
 ## Architecture
 
