@@ -188,6 +188,7 @@ python transcribe_videos_subprocess.py /path/to/video_dir \
 
 Resume behavior:
 - completed files are skipped when a valid sibling `video.json` already exists
+- a valid JSON may contain an empty transcript (`"text": ""`) for silent / non-speech clips; this still counts as completed
 - failed files are skipped by default if `video.error` exists
 - add `--retry-errors` to retry failed files
 - optional `--state-file` writes one JSONL progress record per video for auditing long runs

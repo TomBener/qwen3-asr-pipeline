@@ -26,7 +26,13 @@ def is_done(video_path: Path) -> bool:
     try:
         with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
-        return bool(data.get("result", {}).get("text"))
+        return (
+            isinstance(data, dict)
+            and isinstance(data.get("metadata"), dict)
+            and isinstance(data.get("result"), dict)
+            and "text" in data["result"]
+            and not has_errored(video_path)
+        )
     except Exception:
         return False
 
